@@ -1,0 +1,123 @@
+import os
+import copy
+import argparse
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from config import GRPOConfig
+from data import load_gsm8k, format_prompt
+from reward import reward_fn
+from grpo import sample_group, score_group, normalize_advantages, compute_token_logprobs, grpo_loss
+
+
+def save_checkpoint(path, model, step):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    model.save_pretrained(path)
+    print(f"[checkpoint] saved to {path} at step {step}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", type=str, default=None)
+    parser.add_argument("--max_steps", type=int, default=None)
+    parser.add_argument("--group_size", type=int, default=None)
+    parser.add_argument("--max_new_tokens", type=int, default=None)
+    parser.add_argument("--device", type=str, default=None)
+    args = parser.parse_args()
+
+    cfg = GRPOConfig()
+    if args.model_name:
+        cfg.model_name = args.model_name
+    if args.max_steps:
+        cfg.max_steps = args.max_steps
+    if args.group_size:
+        cfg.group_size = args.group_size
+    if args.max_new_tokens:
+        cfg.max_new_tokens = args.max_new_tokens
+
+    device = cfg.device or args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(cfg.seed)
+
+    print(f"Loading policy model: {cfg.model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    policy = AutoModelForCausalLM.from_pretrained(cfg.model_name).to(device)
+    ref_model = copy.deepcopy(policy).to(device)
+    ref_model.eval()
+    for p in ref_model.parameters():
+        p.requires_grad_(False)
+
+    optimizer = torch.optim.AdamW(policy.parameters(), lr=cfg.lr)
+
+    data = load_gsm8k("train")
+    print(f"Loaded {len(data)} training examples")
+
+    step = 0
+    data_idx = 0
+    while step < cfg.max_steps:
+        # --- collect a batch of prompts, each expanded into a group of rollouts ---
+        batch_loss = 0.0
+        batch_reward = 0.0
+        batch_kl = 0.0
+        n_prompts = 0
+
+        optimizer.zero_grad(set_to_none=True)
+
+        for _ in range(cfg.batch_prompts):
+            example = data[data_idx % len(data)]
+            data_idx += 1
+            prompt = format_prompt(example["question"])
+
+            policy.eval()
+            gen_ids, attn_mask, completion_mask, completions, prompt_len = sample_group(
+                policy, tokenizer, prompt, cfg, device
+            )
+            policy.train()
+
+            rewards = score_group(completions, example["answer"], reward_fn)
+            advantages = normalize_advantages(rewards).to(device)
+
+            with torch.no_grad():
+                old_logprobs = compute_token_logprobs(policy, gen_ids, attn_mask)
+                ref_logprobs = compute_token_logprobs(ref_model, gen_ids, attn_mask)
+
+            for _ in range(cfg.inner_epochs):
+                new_logprobs = compute_token_logprobs(policy, gen_ids, attn_mask)
+                loss, mean_kl = grpo_loss(
+                    new_logprobs, old_logprobs, ref_logprobs, advantages, completion_mask, cfg
+                )
+                (loss / cfg.batch_prompts).backward()
+
+            batch_loss += loss.item()
+            batch_reward += rewards.mean().item()
+            batch_kl += mean_kl
+            n_prompts += 1
+
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.grad_clip)
+        optimizer.step()
+
+        if step % cfg.log_every == 0:
+            print(
+                f"step {step:5d} | loss {batch_loss/n_prompts:.4f} "
+                f"| mean_reward {batch_reward/n_prompts:.3f} | mean_kl {batch_kl/n_prompts:.4f}"
+            )
+
+        if step % cfg.log_samples_every == 0 and step > 0:
+            print(f"  [sample] prompt: {prompt[:80]}...")
+            print(f"  [sample] completion: {completions[0][:200]}")
+            print(f"  [sample] reward: {rewards[0].item():.2f}")
+
+        if step % cfg.ckpt_every == 0 and step > 0:
+            save_checkpoint(os.path.join(cfg.ckpt_dir, f"step_{step}"), policy, step)
+
+        step += 1
+
+    save_checkpoint(os.path.join(cfg.ckpt_dir, "final"), policy, cfg.max_steps)
+    print("GRPO training complete.")
+
+
+if __name__ == "__main__":
+    main()

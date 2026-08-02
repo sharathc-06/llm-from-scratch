@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Training outputs
+pretrain/checkpoints/
+
+# Dataset
+pretrain/data/corpus.txt
+
+# Cached tokenizer/data
+pretrain/data/*.bin
+
+# OS
+.DS_Store
+Thumbs.db
