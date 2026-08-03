@@ -55,11 +55,22 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    print("Loading policy...")
     policy = AutoModelForCausalLM.from_pretrained(cfg.model_name).to(device)
-    ref_model = copy.deepcopy(policy).to(device)
+    print("Policy loaded")
+
+    print("Copying reference model...")
+    ref_model = copy.deepcopy(policy)
+    print("Reference copied")
+
+    ref_model = ref_model.to(device)
+    print("Reference moved to GPU")
+
     ref_model.eval()
     for p in ref_model.parameters():
         p.requires_grad_(False)
+
+    print("Reference ready")
 
     optimizer = torch.optim.AdamW(policy.parameters(), lr=cfg.lr)
 
