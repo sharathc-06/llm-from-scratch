@@ -11,10 +11,20 @@ from reward import reward_fn
 from grpo import sample_group, score_group, normalize_advantages, compute_token_logprobs, grpo_loss
 
 
-def save_checkpoint(path, model, step):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+def save_checkpoint(path, model, optimizer, step):
+    os.makedirs(path, exist_ok=True)
     model.save_pretrained(path)
+    torch.save({"optimizer_state": optimizer.state_dict(), "step": step}, os.path.join(path, "train_state.pt"))
     print(f"[checkpoint] saved to {path} at step {step}")
+
+
+def load_checkpoint(path, model, optimizer, device):
+    model_loaded = AutoModelForCausalLM.from_pretrained(path).to(device)
+    model.load_state_dict(model_loaded.state_dict())
+    state = torch.load(os.path.join(path, "train_state.pt"), map_location=device)
+    optimizer.load_state_dict(state["optimizer_state"])
+    print(f"[checkpoint] resumed from {path} at step {state['step']}")
+    return state["step"]
 
 
 def main():
@@ -24,6 +34,7 @@ def main():
     parser.add_argument("--group_size", type=int, default=None)
     parser.add_argument("--max_new_tokens", type=int, default=None)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--resume_from", type=str, default=None)
     args = parser.parse_args()
 
     cfg = GRPOConfig()
@@ -52,11 +63,15 @@ def main():
 
     optimizer = torch.optim.AdamW(policy.parameters(), lr=cfg.lr)
 
+    start_step = 0
+    if args.resume_from:
+        start_step = load_checkpoint(args.resume_from, policy, optimizer, device)
+
     data = load_gsm8k("train")
     print(f"Loaded {len(data)} training examples")
 
-    step = 0
-    data_idx = 0
+    step = start_step
+    data_idx = start_step * cfg.batch_prompts
     while step < cfg.max_steps:
         # --- collect a batch of prompts, each expanded into a group of rollouts ---
         batch_loss = 0.0
@@ -111,11 +126,11 @@ def main():
             print(f"  [sample] reward: {rewards[0].item():.2f}")
 
         if step % cfg.ckpt_every == 0 and step > 0:
-            save_checkpoint(os.path.join(cfg.ckpt_dir, f"step_{step}"), policy, step)
+            save_checkpoint(os.path.join(cfg.ckpt_dir, f"step_{step}"), policy, optimizer, step)
 
         step += 1
 
-    save_checkpoint(os.path.join(cfg.ckpt_dir, "final"), policy, cfg.max_steps)
+    save_checkpoint(os.path.join(cfg.ckpt_dir, "final"), policy, optimizer, cfg.max_steps)
     print("GRPO training complete.")
 
 
