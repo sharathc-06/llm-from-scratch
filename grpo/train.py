@@ -49,28 +49,19 @@ def main():
 
     device = cfg.device or args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(cfg.seed)
+    amp_enabled = cfg.use_amp and device == "cuda"
+    autocast = lambda: torch.autocast(device_type="cuda", dtype=torch.float16, enabled=amp_enabled)
 
     print(f"Loading policy model: {cfg.model_name}")
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print("Loading policy...")
     policy = AutoModelForCausalLM.from_pretrained(cfg.model_name).to(device)
-    print("Policy loaded")
-
-    print("Copying reference model...")
-    ref_model = copy.deepcopy(policy)
-    print("Reference copied")
-
-    ref_model = ref_model.to(device)
-    print("Reference moved to GPU")
-
+    ref_model = copy.deepcopy(policy).to(device)
     ref_model.eval()
     for p in ref_model.parameters():
         p.requires_grad_(False)
-
-    print("Reference ready")
 
     optimizer = torch.optim.AdamW(policy.parameters(), lr=cfg.lr)
 
@@ -95,26 +86,28 @@ def main():
         for _ in range(cfg.batch_prompts):
             example = data[data_idx % len(data)]
             data_idx += 1
-            prompt = format_prompt(example["question"])
+            prompt = format_prompt(example["question"], tokenizer)
 
             policy.eval()
-            gen_ids, attn_mask, completion_mask, completions, prompt_len = sample_group(
-                policy, tokenizer, prompt, cfg, device
-            )
+            with autocast():
+                gen_ids, attn_mask, completion_mask, completions, prompt_len = sample_group(
+                    policy, tokenizer, prompt, cfg, device
+                )
             policy.train()
 
             rewards = score_group(completions, example["answer"], reward_fn)
             advantages = normalize_advantages(rewards).to(device)
 
-            with torch.no_grad():
+            with torch.no_grad(), autocast():
                 old_logprobs = compute_token_logprobs(policy, gen_ids, attn_mask)
                 ref_logprobs = compute_token_logprobs(ref_model, gen_ids, attn_mask)
 
             for _ in range(cfg.inner_epochs):
-                new_logprobs = compute_token_logprobs(policy, gen_ids, attn_mask)
-                loss, mean_kl = grpo_loss(
-                    new_logprobs, old_logprobs, ref_logprobs, advantages, completion_mask, cfg
-                )
+                with autocast():
+                    new_logprobs = compute_token_logprobs(policy, gen_ids, attn_mask)
+                    loss, mean_kl = grpo_loss(
+                        new_logprobs, old_logprobs, ref_logprobs, advantages, completion_mask, cfg
+                    )
                 (loss / cfg.batch_prompts).backward()
 
             batch_loss += loss.item()

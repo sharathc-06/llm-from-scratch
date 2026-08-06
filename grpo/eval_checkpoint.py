@@ -48,7 +48,7 @@ def main():
         total_reward = 0.0
         samples_printed = 0
         for ex in data:
-            prompt = format_prompt(ex["question"])
+            prompt = format_prompt(ex["question"], tokenizer)
             enc = tokenizer(prompt, return_tensors="pt").to(device)
             with torch.no_grad():
                 out = m.generate(

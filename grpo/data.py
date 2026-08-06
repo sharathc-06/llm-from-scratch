@@ -16,7 +16,7 @@ SYNTHETIC_FALLBACK = [
 def load_gsm8k(split: str = "train"):
     try:
         from datasets import load_dataset
-        ds = load_dataset("openai/gsm8k", "main", split=split)
+        ds = load_dataset("gsm8k", "main", split=split)
         examples = []
         for row in ds:
             gt = float(row["answer"].split("####")[-1].strip().replace(",", ""))
@@ -27,9 +27,21 @@ def load_gsm8k(split: str = "train"):
         return SYNTHETIC_FALLBACK
 
 
-def format_prompt(question: str) -> str:
-    return (
+def format_prompt(question: str, tokenizer=None) -> str:
+    """
+    Format a GSM8K question into a prompt. If a tokenizer with a chat template
+    is passed (true for instruct models), use it -- instruct models are
+    trained to expect the specific turn-formatting tokens their chat template
+    inserts, and without it they often don't recognize they're being asked to
+    respond at all (frequently emitting an end-of-turn token almost
+    immediately instead of attempting an answer).
+    """
+    instruction = (
         "Solve the following math problem step by step. "
         "End your response with '#### <final numeric answer>'.\n\n"
-        f"Question: {question}\nAnswer:"
+        f"Question: {question}"
     )
+    if tokenizer is not None and getattr(tokenizer, "chat_template", None):
+        messages = [{"role": "user", "content": instruction}]
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return f"{instruction}\nAnswer:"
