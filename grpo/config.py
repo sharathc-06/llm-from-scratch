@@ -4,8 +4,11 @@ from typing import Optional
 
 @dataclass
 class GRPOConfig:
-    # model -- swap model_name for a real run (e.g. HuggingFaceTB/SmolLM2-360M)
-    model_name: str = "HuggingFaceTB/SmolLM2-360M"
+    # model -- instruct variant matters: base models don't know to stop after
+    # answering, which pollutes both reward scoring and gradient credit
+    # assignment (see grpo.py's _truncate_at_answer for the mitigation, but
+    # starting from a model that already knows to terminate is the real fix)
+    model_name: str = "HuggingFaceTB/SmolLM2-360M-Instruct"
 
     # rollout / sampling
     group_size: int = 8          # completions sampled per prompt (this replaces PPO's critic)
@@ -24,6 +27,10 @@ class GRPOConfig:
     max_steps: int = 1000
     batch_prompts: int = 4       # distinct prompts sampled per training step
     grad_clip: float = 1.0
+
+    # mixed precision -- meaningfully helps on Tensor-Core GPUs (T4, A10, etc.),
+    # not on P100 (no Tensor Cores) or CPU
+    use_amp: bool = True
 
     # logging / checkpointing
     log_every: int = 5

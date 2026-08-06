@@ -13,16 +13,40 @@ rewards are normalized within that group, not against a global baseline, which
 is exactly what removes the need for a learned value/critic network that PPO
 requires.
 """
+import re
 import torch
 import torch.nn.functional as F
+
+
+def _truncate_at_answer(text: str, tokenizer, prompt_len: int):
+    """
+    Base (non-instruct) models don't know to stop after answering -- they'll
+    keep rambling into a hallucinated new question. If we don't cut that off,
+    two things break: reward scoring grabs the wrong (later) number, and the
+    model gets gradient signal for tokens it generated *after* already
+    answering, polluting credit assignment.
+
+    Truncates `text` right after the first '#### <number>' match. Returns the
+    truncated text and how many generated tokens that corresponds to (by
+    re-encoding the truncated text -- an approximation for BPE, but accurate
+    enough for masking purposes). If no '####' is found, returns the text and
+    length unchanged (that completion gets 0 reward anyway, from reward_fn).
+    """
+    m = re.search(r"####\s*-?\d[\d,]*\.?\d*", text)
+    if not m:
+        return text, None  # no truncation possible/needed
+    truncated_text = text[: m.end()]
+    truncated_ids = tokenizer(truncated_text, add_special_tokens=False)["input_ids"]
+    return truncated_text, len(truncated_ids)
 
 
 @torch.no_grad()
 def sample_group(model, tokenizer, prompt: str, cfg, device):
     """Sample cfg.group_size completions for a single prompt. Returns padded
     input_ids/attention_mask for the full (prompt+completion) sequences, a
-    completion_mask marking which positions are generated (not prompt/pad),
-    and the decoded completion texts (for reward scoring)."""
+    completion_mask marking which positions are generated (not prompt/pad/
+    post-answer rambling), and the decoded+truncated completion texts (for
+    reward scoring)."""
     enc = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=cfg.max_prompt_tokens)
     input_ids = enc["input_ids"].to(device)
     attention_mask = enc["attention_mask"].to(device)
@@ -43,11 +67,19 @@ def sample_group(model, tokenizer, prompt: str, cfg, device):
     )
 
     full_attention_mask = (gen != tokenizer.pad_token_id).long()
-    # completion_mask marks generated tokens only (not prompt, not padding)
     completion_mask = torch.zeros_like(gen)
     completion_mask[:, prompt_len:] = full_attention_mask[:, prompt_len:]
 
-    completions = tokenizer.batch_decode(gen[:, prompt_len:], skip_special_tokens=True)
+    raw_completions = tokenizer.batch_decode(gen[:, prompt_len:], skip_special_tokens=True)
+    completions = []
+    for i, text in enumerate(raw_completions):
+        truncated_text, cutoff_len = _truncate_at_answer(text, tokenizer, prompt_len)
+        completions.append(truncated_text)
+        if cutoff_len is not None:
+            # zero out mask positions after the answer -- no gradient credit/
+            # blame for tokens generated after the model already answered
+            completion_mask[i, prompt_len + cutoff_len:] = 0
+
     return gen, full_attention_mask, completion_mask, completions, prompt_len
 
 
