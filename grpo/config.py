@@ -11,9 +11,9 @@ class GRPOConfig:
     model_name: str = "HuggingFaceTB/SmolLM2-360M-Instruct"
 
     # rollout / sampling
-    group_size: int = 8          # completions sampled per prompt (this replaces PPO's critic)
+    group_size: int = 4          # completions sampled per prompt (this replaces PPO's critic)
     max_prompt_tokens: int = 256
-    max_new_tokens: int = 256
+    max_new_tokens: int = 128
     temperature: float = 0.8
     top_k: int = 50
 
@@ -25,7 +25,7 @@ class GRPOConfig:
     # optimization
     lr: float = 1e-6             # RL fine-tuning LR is much smaller than pretraining LR
     max_steps: int = 1000
-    batch_prompts: int = 4       # distinct prompts sampled per training step
+    batch_prompts: int = 2       # distinct prompts sampled per training step
     grad_clip: float = 1.0
 
     # mixed precision -- meaningfully helps on Tensor-Core GPUs (T4, A10, etc.),
