@@ -119,7 +119,7 @@ def main():
             del gen_ids, attn_mask, completion_mask, completions
             del rewards, advantages, old_logprobs, ref_logprobs
             del new_logprobs, loss
-            del prompt
+   
 
         torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.grad_clip)
         optimizer.step()
