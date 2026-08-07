@@ -1,4 +1,6 @@
 import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import copy
 import argparse
 
@@ -10,7 +12,6 @@ from data import load_gsm8k, format_prompt
 from reward import reward_fn
 from grpo import sample_group, score_group, normalize_advantages, compute_token_logprobs, grpo_loss
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 def save_checkpoint(path, model, optimizer, step):
     os.makedirs(path, exist_ok=True)
@@ -59,6 +60,8 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     policy = AutoModelForCausalLM.from_pretrained(cfg.model_name).to(device)
+    
+    # Cast reference model to FP16 to save ~1.4 GB VRAM
     ref_model = copy.deepcopy(policy).half().to(device)
     ref_model.eval()
     for p in ref_model.parameters():
@@ -76,7 +79,6 @@ def main():
     step = start_step
     data_idx = start_step * cfg.batch_prompts
     while step < cfg.max_steps:
-        # --- collect a batch of prompts, each expanded into a group of rollouts ---
         batch_loss = 0.0
         batch_reward = 0.0
         batch_kl = 0.0
@@ -89,6 +91,7 @@ def main():
             data_idx += 1
             prompt = format_prompt(example["question"], tokenizer)
 
+            # Rollout collection
             policy.eval()
             with autocast():
                 gen_ids, attn_mask, completion_mask, completions, prompt_len = sample_group(
@@ -99,27 +102,34 @@ def main():
             rewards = score_group(completions, example["answer"], reward_fn)
             advantages = normalize_advantages(rewards).to(device)
 
+            # Reference logprobs pass
             with torch.no_grad(), autocast():
-                old_logprobs = compute_token_logprobs(policy, gen_ids, attn_mask)
                 ref_logprobs = compute_token_logprobs(ref_model, gen_ids, attn_mask)
 
-            for _ in range(cfg.inner_epochs):
-                with autocast():
-                    new_logprobs = compute_token_logprobs(policy, gen_ids, attn_mask)
-                    loss, mean_kl = grpo_loss(
-                        new_logprobs, old_logprobs, ref_logprobs, advantages, completion_mask, cfg
-                    )
-                (loss / cfg.batch_prompts).backward()
+            # Policy forward pass (using detach to eliminate redundant forward pass)
+            with autocast():
+                new_logprobs = compute_token_logprobs(policy, gen_ids, attn_mask)
+                old_logprobs = new_logprobs.detach()
+                loss, mean_kl = grpo_loss(
+                    new_logprobs, old_logprobs, ref_logprobs, advantages, completion_mask, cfg
+                )
+
+            (loss / cfg.batch_prompts).backward()
 
             batch_loss += loss.item()
             batch_reward += rewards.mean().item()
             batch_kl += mean_kl
             n_prompts += 1
-            # At the end of the prompt loop iteration in train.py:
+
+            # Cache logging values locally before deleting tensors
+            last_prompt = prompt
+            last_completion = completions[0]
+            last_reward = rewards[0].item()
+
+            # Clean tensor references immediately so native allocator reuses memory
             del gen_ids, attn_mask, completion_mask, completions
             del rewards, advantages, old_logprobs, ref_logprobs
             del new_logprobs, loss
-   
 
         torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.grad_clip)
         optimizer.step()
@@ -131,9 +141,9 @@ def main():
             )
 
         if step % cfg.log_samples_every == 0 and step > 0:
-            print(f"  [sample] prompt: {prompt[:80]}...")
-            print(f"  [sample] completion: {completions[0][:200]}")
-            print(f"  [sample] reward: {rewards[0].item():.2f}")
+            print(f"  [sample] prompt: {last_prompt[:80]}...")
+            print(f"  [sample] completion: {last_completion[:200]}")
+            print(f"  [sample] reward: {last_reward:.2f}")
 
         if step % cfg.ckpt_every == 0 and step > 0:
             save_checkpoint(os.path.join(cfg.ckpt_dir, f"step_{step}"), policy, optimizer, step)
