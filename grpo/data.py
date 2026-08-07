@@ -16,7 +16,7 @@ SYNTHETIC_FALLBACK = [
 def load_gsm8k(split: str = "train"):
     try:
         from datasets import load_dataset
-        ds = load_dataset("gsm8k", "main", split=split)
+        ds = load_dataset("openai/gsm8k", "main", split=split)
         examples = []
         for row in ds:
             gt = float(row["answer"].split("####")[-1].strip().replace(",", ""))
