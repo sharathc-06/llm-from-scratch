@@ -59,7 +59,7 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     policy = AutoModelForCausalLM.from_pretrained(cfg.model_name).to(device)
-    ref_model = copy.deepcopy(policy).to(device)
+    ref_model = copy.deepcopy(policy).half().to(device)
     ref_model.eval()
     for p in ref_model.parameters():
         p.requires_grad_(False)
