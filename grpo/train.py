@@ -115,6 +115,11 @@ def main():
             batch_reward += rewards.mean().item()
             batch_kl += mean_kl
             n_prompts += 1
+            # At the end of the prompt loop iteration in train.py:
+            del gen_ids, attn_mask, completion_mask, completions
+            del rewards, advantages, old_logprobs, ref_logprobs
+            del new_logprobs, loss
+            del prompt
 
         torch.nn.utils.clip_grad_norm_(policy.parameters(), cfg.grad_clip)
         optimizer.step()
