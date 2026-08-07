@@ -10,6 +10,7 @@ from data import load_gsm8k, format_prompt
 from reward import reward_fn
 from grpo import sample_group, score_group, normalize_advantages, compute_token_logprobs, grpo_loss
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 def save_checkpoint(path, model, optimizer, step):
     os.makedirs(path, exist_ok=True)
