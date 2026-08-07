@@ -100,14 +100,14 @@ def normalize_advantages(rewards: torch.Tensor, eps: float = 1e-4) -> torch.Tens
 
 
 def compute_token_logprobs(model, input_ids, attention_mask):
-    """Per-token log p(token_t | tokens_<t}) for every position, shifted so
-    logprobs[:, t] is the log-prob of predicting input_ids[:, t+1]."""
     outputs = model(input_ids=input_ids, attention_mask=attention_mask)
     logits = outputs.logits[:, :-1, :]
     targets = input_ids[:, 1:]
-    logprobs = F.log_softmax(logits.float(), dim=-1)
+    
+    # Compute log_softmax in FP16/BF16 before slicing target tokens
+    logprobs = F.log_softmax(logits, dim=-1)
     token_logprobs = logprobs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-    return token_logprobs  # (B, T-1)
+    return token_logprobs
 
 
 def grpo_loss(new_logprobs, old_logprobs, ref_logprobs, advantages, completion_mask, cfg):
