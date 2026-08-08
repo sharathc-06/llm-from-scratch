@@ -17,7 +17,11 @@ from reward import reward_fn, extract_answer
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", required=True, help="path to a checkpoint folder, e.g. checkpoints/final")
-    parser.add_argument("--base_model", default="HuggingFaceTB/SmolLM2-360M", help="only used to load the tokenizer")
+    parser.add_argument("--base_model", default="HuggingFaceTB/SmolLM2-360M", help="plain base model for comparison")
+    parser.add_argument("--trained_tokenizer", default="HuggingFaceTB/SmolLM2-360M-Instruct",
+                         help="tokenizer matching whatever model_name the checkpoint was actually trained from -- "
+                              "must match cfg.model_name from your training run, since save_pretrained on the "
+                              "checkpoint doesn't include the tokenizer/chat template")
     parser.add_argument("--n_examples", type=int, default=50)
     parser.add_argument("--max_new_tokens", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.3, help="low temp for eval -- we want its best attempt, not diverse sampling")
@@ -29,33 +33,45 @@ def main():
     print(f"Loading checkpoint from {args.ckpt} ...")
     model = AutoModelForCausalLM.from_pretrained(args.ckpt).to(device)
     model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    # IMPORTANT: this must be the tokenizer for whatever model the checkpoint
+    # was actually trained from (chat template matters -- see the warning this
+    # script prints below if it looks like there's a mismatch).
+    trained_tokenizer = AutoTokenizer.from_pretrained(args.trained_tokenizer)
+    if trained_tokenizer.pad_token is None:
+        trained_tokenizer.pad_token = trained_tokenizer.eos_token
+    if not getattr(trained_tokenizer, "chat_template", None):
+        print(f"WARNING: tokenizer '{args.trained_tokenizer}' has no chat_template. If your checkpoint was "
+              f"trained from an instruct model, generations will likely come out empty -- pass the correct "
+              f"--trained_tokenizer matching cfg.model_name from training.")
 
     # also load the raw base model for a side-by-side comparison -- this is the
-    # real test of "did GRPO help at all" rather than a number in isolation
+    # real test of "did GRPO help at all" rather than a number in isolation.
+    # Uses its OWN tokenizer, separate from the trained checkpoint's, since a
+    # plain base model has no chat template and expects plain-text prompts.
     print(f"Loading base model {args.base_model} for comparison ...")
     base_model = AutoModelForCausalLM.from_pretrained(args.base_model).to(device)
     base_model.eval()
+    base_tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    if base_tokenizer.pad_token is None:
+        base_tokenizer.pad_token = base_tokenizer.eos_token
 
     data = load_gsm8k("test")  # held-out split -- NOT what it trained on
     data = data[:args.n_examples]
     print(f"Evaluating on {len(data)} held-out test examples\n")
 
-    def run_eval(m, label):
+    def run_eval(m, tok, label):
         correct = 0
         total_reward = 0.0
         samples_printed = 0
         for ex in data:
-            prompt = format_prompt(ex["question"], tokenizer)
-            enc = tokenizer(prompt, return_tensors="pt").to(device)
+            prompt = format_prompt(ex["question"], tok)
+            enc = tok(prompt, return_tensors="pt").to(device)
             with torch.no_grad():
                 out = m.generate(
                     **enc, max_new_tokens=args.max_new_tokens, do_sample=True,
-                    temperature=args.temperature, pad_token_id=tokenizer.pad_token_id,
+                    temperature=args.temperature, pad_token_id=tok.pad_token_id,
                 )
-            completion = tokenizer.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True)
+            completion = tok.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True)
             r = reward_fn(completion, ex["answer"])
             total_reward += r
             if r >= 1.0:
@@ -72,10 +88,10 @@ def main():
         return acc, avg_reward
 
     print("--- BASE MODEL (no RL training) ---")
-    base_acc, base_reward = run_eval(base_model, "base")
+    base_acc, base_reward = run_eval(base_model, base_tokenizer, "base")
 
     print("--- GRPO-TRAINED CHECKPOINT ---")
-    trained_acc, trained_reward = run_eval(model, "trained")
+    trained_acc, trained_reward = run_eval(model, trained_tokenizer, "trained")
 
     print("=" * 60)
     print(f"Base model:     {base_acc:.1%} accuracy, {base_reward:.3f} avg reward")
