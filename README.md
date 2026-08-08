@@ -63,9 +63,65 @@ Periodically read the actual printed sample completions (`log_samples_every`)
 — this is the real signal for whether reasoning is improving, more than any
 single number.
 
-## What's not built yet (the rest of the R1 recipe)
+# Stage 2: rejection sampling + SFT
 
-This is stage 1 only (cold-start RL on the raw base model). Stages 2-3
-(rejection-sample this model's own correct outputs into a fresh SFT dataset,
-then run GRPO again on that improved model) come next, once this stage
-produces a model that's actually getting some rewards.
+Takes your stage-1 GRPO checkpoint, samples multiple attempts per training
+question, keeps only the ones that got the right answer, and uses those to
+fine-tune a **fresh copy** of the base model (not the GRPO checkpoint --
+starting clean, matching the actual R1 recipe). The model teaches itself:
+no human wrote these training examples, they're the model's own successful
+reasoning, filtered for correctness.
+
+## Verified locally
+
+Both scripts ran end-to-end with a tiny random-init model (this sandbox has
+no Hugging Face Hub access): rejection sampling correctly scores completions
+and writes valid JSONL; the SFT dataset correctly masks prompt tokens (only
+completion tokens get gradient signal); a real forward/backward/optimizer
+step runs cleanly.
+
+## Files
+
+- `rejection_sample.py` — samples N attempts per question from your GRPO
+  checkpoint, filters to reward >= 1.0 (genuinely correct, not just
+  format-bonus), writes `{question, answer, completion}` JSONL.
+- `sft_train.py` — standard SFT: cross-entropy loss on completion tokens
+  only (prompt masked with -100), trained from a fresh base model copy.
+- `data.py`, `reward.py` — same as stage 1, copied in so this folder is
+  self-contained.
+
+## Running on Colab
+
+Step 1 — generate the dataset from your stage-1 checkpoint:
+
+```bash
+python rejection_sample.py --ckpt /path/to/your/grpo/checkpoints/final \
+    --trained_tokenizer HuggingFaceTB/SmolLM2-360M-Instruct \
+    --n_questions 500 --samples_per_question 4 --out sft_data.jsonl
+```
+
+Watch the accept rate it prints. Given your stage-1 eval showed ~2-4%
+accuracy, expect a low accept rate here too -- that's normal, not a bug.
+If you end up with fewer than ~50-100 examples, raise `--n_questions` or
+`--samples_per_question` before moving on; too little data makes stage 2
+unreliable.
+
+Step 2 — fine-tune a fresh model on it:
+
+```bash
+python sft_train.py --data sft_data.jsonl \
+    --base_model HuggingFaceTB/SmolLM2-360M-Instruct \
+    --epochs 3 --out_dir sft_checkpoint
+```
+
+Note the LR here (`2e-5` default) is much higher than GRPO's -- this is
+ordinary supervised learning, not RL, so it converges faster and doesn't
+need the same caution.
+
+## Evaluating
+
+Reuse `eval_checkpoint.py` from stage 1 -- point `--ckpt` at `sft_checkpoint`
+and `--trained_tokenizer` at the same base model name, and compare against
+both the raw base model AND your stage-1 GRPO checkpoint. Three-way
+comparison is the real test of whether stage 2 helped.
+
