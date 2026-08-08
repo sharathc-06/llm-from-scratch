@@ -14,17 +14,25 @@ SYNTHETIC_FALLBACK = [
 
 
 def load_gsm8k(split: str = "train"):
-    try:
-        from datasets import load_dataset
-        ds = load_dataset("openai/gsm8k", "main", split=split)
-        examples = []
-        for row in ds:
-            gt = float(row["answer"].split("####")[-1].strip().replace(",", ""))
-            examples.append({"question": row["question"], "answer": gt})
-        return examples
-    except Exception as e:
-        print(f"[data] could not load GSM8K ({e}); using tiny synthetic fallback for local testing")
-        return SYNTHETIC_FALLBACK
+    # the datasets library's naming for this repo has shifted before --
+    # try the current canonical id first, then the older bare name, then fall
+    # back to the synthetic set if neither loads (e.g. offline)
+    last_error = None
+    for repo_id in ["openai/gsm8k", "gsm8k"]:
+        try:
+            from datasets import load_dataset
+            ds = load_dataset(repo_id, "main", split=split)
+            examples = []
+            for row in ds:
+                gt = float(row["answer"].split("####")[-1].strip().replace(",", ""))
+                examples.append({"question": row["question"], "answer": gt})
+            print(f"[data] loaded GSM8K from '{repo_id}': {len(examples)} examples")
+            return examples
+        except Exception as e:
+            last_error = e
+            continue
+    print(f"[data] could not load GSM8K from any known repo id ({last_error}); using tiny synthetic fallback")
+    return SYNTHETIC_FALLBACK
 
 
 def format_prompt(question: str, tokenizer=None) -> str:

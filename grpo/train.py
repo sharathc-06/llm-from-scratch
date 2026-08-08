@@ -8,7 +8,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from config import GRPOConfig
-from data import load_gsm8k, format_prompt
+from data import load_gsm8k, format_prompt, SYNTHETIC_FALLBACK
 from reward import reward_fn
 from grpo import sample_group, score_group, normalize_advantages, compute_token_logprobs, grpo_loss
 
@@ -74,6 +74,13 @@ def main():
         start_step = load_checkpoint(args.resume_from, policy, optimizer, device)
 
     data = load_gsm8k("train")
+    if data is SYNTHETIC_FALLBACK:
+        print("\n" + "!" * 70)
+        print("! WARNING: real GSM8K failed to load -- training on the TINY")
+        print("! SYNTHETIC fallback set (6 trivial arithmetic questions).")
+        print("! This is fine for a smoke test, but results are meaningless")
+        print("! for a real run. Fix the dataset loading error above first.")
+        print("!" * 70 + "\n")
     print(f"Loaded {len(data)} training examples")
 
     step = start_step
