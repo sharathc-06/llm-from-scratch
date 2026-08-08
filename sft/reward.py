@@ -35,6 +35,16 @@ def extract_answer(text: str) -> Optional[float]:
         return None
 
 
+def has_explicit_marker(text: str) -> bool:
+    """True only if the '#### <number>' format was actually used -- as opposed
+    to extract_answer's looser fallback (grabbing the last number anywhere in
+    the text), which can accidentally match a correct final number even when
+    the reasoning leading up to it was muddled, contradictory, or hallucinated.
+    Useful for filtering SFT training data, where you're teaching the model to
+    literally reproduce the completion -- a stricter bar than scoring RL reward."""
+    return re.search(r"####\s*-?\d[\d,]*\.?\d*", text) is not None
+
+
 def reward_fn(response: str, ground_truth: float) -> float:
     """
     Core verifiable reward:
