@@ -15,12 +15,13 @@ Usage:
 """
 import argparse
 import json
+import re
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from data import load_gsm8k, format_prompt
-from reward import reward_fn
+from reward import reward_fn, has_explicit_marker
 
 
 def main():
@@ -67,11 +68,19 @@ def main():
             for completion in completions:
                 attempted += 1
                 r = reward_fn(completion, ex["answer"])
-                if r >= 1.0:  # only keep genuinely correct completions, not format-only partial credit
+                # require BOTH correctness AND an explicit '####' marker -- reward_fn alone
+                # can accept a lucky last-number match from muddled/contradictory reasoning,
+                # which is fine for RL (diluted across many samples) but bad to directly
+                # teach a model to reproduce verbatim via SFT
+                if r >= 1.0 and has_explicit_marker(completion):
+                    # truncate right after the answer -- teaches "stop once answered"
+                    # rather than "keep rambling after the answer marker"
+                    m = re.search(r"####\s*-?\d[\d,]*\.?\d*", completion)
+                    truncated = completion[: m.end()]
                     f.write(json.dumps({
                         "question": ex["question"],
                         "answer": ex["answer"],
-                        "completion": completion.strip(),
+                        "completion": truncated.strip(),
                     }) + "\n")
                     kept += 1
 
