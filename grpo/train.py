@@ -37,11 +37,14 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=None)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--resume_from", type=str, default=None)
+    parser.add_argument("--ckpt_dir", type=str, default=None)
     args = parser.parse_args()
 
     cfg = GRPOConfig()
     if args.model_name:
         cfg.model_name = args.model_name
+    if args.ckpt_dir:
+        cfg.ckpt_dir = args.ckpt_dir
     if args.max_steps:
         cfg.max_steps = args.max_steps
     if args.group_size:
